@@ -1,26 +1,13 @@
-"""
-The Codes in this file are used to classify Human Activity using Channel State Information. 
-The deep learning architecture used here is Bidirectional LSTM stacked with One Attention Layer.
-Author: https://github.com/ludlows
-2019-12
-"""
 import numpy as np 
 import tensorflow as tf
 import glob
 import os
 import csv
-
+import json
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 def merge_csi_label(csifile, win_len=100, thrshd=0.6, step=20):
-    """
-    Merge CSV files into a Numpy Array  X,  csi amplitude feature
-    Returns Numpy Array X, Shape(Num, Win_Len, 166)
-    Args:
-        csifile  :  str, csv file containing CSI data
-        win_len  :  integer, window length
-        thrshd   :  float,  determine if an activity is strong enough inside a window
-        step     :  integer, sliding window by step
-    """
     csi = []
     with open(csifile, 'r') as csif:
         reader = csv.reader(csif, delimiter=',')
@@ -31,16 +18,17 @@ def merge_csi_label(csifile, win_len=100, thrshd=0.6, step=20):
             except ValueError:
                 print(f"Skipping line due to conversion error: {line}")
                 continue
-    csi = np.concatenate(csi, axis=0)
+    if len(csi) == 0:
+        print(f"No valid CSI data found in file: {csifile}")
+        return None
 
+    csi = np.concatenate(csi, axis=0)
     print('💔CSI Shape:', csi.shape, 'CSI', csi)
 
-    # Pad the sequences to ensure they all have the same length
     if csi.shape[0] < win_len:
         padding = np.zeros((win_len - csi.shape[0], csi.shape[1]))
         csi = np.vstack((csi, padding))
 
-    # screen the data with a window
     index = 0
     feature = []
     while index + win_len <= csi.shape[0]:
@@ -49,22 +37,11 @@ def merge_csi_label(csifile, win_len=100, thrshd=0.6, step=20):
         cur_feature[0] = csi[index:index+win_len, :]
         feature.append(cur_feature)
         index += step
-    print('😭',feature)
+    print('😭', feature)
 
-    return np.concatenate(feature, axis=0)
+    return np.concatenate(feature, axis=0) if feature else None
 
 def extract_csi_by_label(raw_folder, label, labels, save=False, win_len=100, thrshd=0.6, step=20):
-    """
-    Returns all the samples (X,y) of "label" in the entire dataset
-    Args:
-        raw_folder: The path of Dataset folder
-        label    : str, could be one of labels
-        labels   : list of str, ['waving', 'twist', 'standing', 'squatting', 'rubhand', 'pushpull', 'punching', 'nopeople', 'jump', 'clap']
-        save     : boolean, choose whether save the numpy array 
-        win_len  :  integer, window length
-        thrshd   :  float,  determine if an activity is strong enough inside a window
-        step     :  integer, sliding window by step
-    """
     print('Starting Extract CSI for Label {}'.format(label))
     label = label.lower()
     if not label in labels:
@@ -81,29 +58,32 @@ def extract_csi_by_label(raw_folder, label, labels, save=False, win_len=100, thr
         csi_data = merge_csi_label(csi_file, win_len=win_len, thrshd=thrshd, step=step)
         if csi_data is not None:
             feature.append(csi_data)
-        print('Finished {:.2f}% for Label {}'.format(index / len(input_csv_files) * 100,label))
+        print('Finished {:.2f}% for Label {}'.format(index / len(input_csv_files) * 100, label))
+
+    if not feature:
+        print(f"No valid data found for label: {label}")
+        return None, None
 
     feat_arr = np.concatenate(feature, axis=0)
     if save:
         np.savez_compressed("X_{}_win_{}_thrshd_{}percent_step_{}.npz".format(
             label, win_len, int(thrshd*100), step), feat_arr)
-    # one hot
     feat_label = np.zeros((feat_arr.shape[0], len(labels)))
     feat_label[:, labels.index(label)] = 1
     return feat_arr, feat_label
 
-
+def extract_csi(raw_folder, labels, save=False, win_len=1000, thrshd=0.6, step=200):
+    ans = []
+    for label in labels:
+        feature_arr, label_arr = extract_csi_by_label(raw_folder, label, labels, save, win_len, thrshd, step)
+        if feature_arr is not None and label_arr is not None:
+            ans.append(feature_arr)
+            ans.append(label_arr)
+    if not ans:
+        raise ValueError("No valid data found for any label.")
+    return tuple(ans)
 
 def train_valid_split(numpy_tuple, train_portion=0.9, seed=379):
-    """
-    Returns Train and Valid Datset with the format of (x_train, y_train, x_valid, y_valid),
-    where x_train and y_train are shuffled randomly.
-
-    Args:
-        numpy_tuple  : tuple of numpy array: (x_waving, x_twist, x_standing, x_squatting, x_rubhand, x_pushpull, x_punching, x_nopeople, x_jump, x_clap)
-        train_portion: float, range (0,1)
-        seed         : random seed
-    """
     np.random.seed(seed=seed)
     x_train = []
     x_valid = []
@@ -131,36 +111,8 @@ def train_valid_split(numpy_tuple, train_portion=0.9, seed=379):
     x_train = x_train[index, ...]
     y_train = y_train[index, ...]
     return x_train, y_train, x_valid, y_valid
-    
-    
-
-def extract_csi(raw_folder, labels, save=False, win_len=1000, thrshd=0.6, step=200):
-    """
-    Return List of Array in the format of [X_label1, y_label1, X_label2, y_label2, .... X_Label10, y_label10]
-    Args:
-        raw_folder: the folder path of raw CSI csv files, input_* annotation_*
-        labels    : all the labels existing in the folder
-        save      : boolean, choose whether save the numpy array 
-        win_len   :  integer, window length
-        thrshd    :  float,  determine if an activity is strong enough inside a window
-        step      :  integer, sliding window by step
-    """
-    ans = []
-    for label in labels:
-        feature_arr, label_arr = extract_csi_by_label(raw_folder, label, labels, save, win_len, thrshd, step)
-        ans.append(feature_arr)
-        ans.append(label_arr)
-    return tuple(ans)
-
 
 class AttenLayer(tf.keras.layers.Layer):
-    """
-    Attention Layers used to Compute Weighted Features along Time axis
-    Args:
-        num_state :  number of hidden Attention state
-    
-    2019-12, https://github.com/ludlows
-    """
     def __init__(self, num_state, **kw):
         super(AttenLayer, self).__init__(**kw)
         self.num_state = num_state
@@ -177,54 +129,29 @@ class AttenLayer(tf.keras.layers.Layer):
         weighted_feature = tf.reduce_sum(tf.multiply(input_tensor, tf.expand_dims(prob, -1)), axis=1)
         return weighted_feature
     
-    # for saving the model
     def get_config(self):
         config = super().get_config().copy()
         config.update({
             'num_state': self.num_state,})
         return config
 
-
 class CSIModelConfig:
-    """
-    class for Human Activity Recognition ("waving", "twist", "standing", "squatting", "rubhand", "pushpull", "punching", "nopeople", "jump", "clap")
-    Using CSI (Channel State Information)
-    Specifically, the author here wants to classify Human Activity using Channel State Information. 
-    The deep learning architecture used here is Bidirectional LSTM stacked with One Attention Layer.
-       2019-12, https://github.com/ludlows
-    Args:
-        win_len   :  integer (1000 default) window length for batching sequence
-        step      :  integer (200  default) sliding window by this step
-        thrshd    :  float   (0.6  default) used to check if the activity is intensive inside a window
-        downsample:  integer >=1 (2 default) downsample along the time axis
-    """
-    def __init__(self, win_len=100, step=20, thrshd=0.6, downsample=2):
+    def __init__(self, labels, win_len=100, step=20, thrshd=0.6, downsample=2):
         self._win_len = win_len
         self._step = step
         self._thrshd = thrshd
-        self._labels = ("waving", "twist", "standing", "squatting", "rubhand", "pushpull", "punching", "nopeople", "jump", "clap")
+        self._labels = labels
         self._downsample = downsample
 
     def preprocessing(self, raw_folder, save=False):
-        """
-        Returns the Numpy Array for training within the format of (X_lable1, y_label1, ...., X_label10, y_label10)
-        Args:
-            raw_folder: the folder containing raw CSI 
-            save      : choose if save the numpy array
-        """
         numpy_tuple = extract_csi(raw_folder, self._labels, save, self._win_len, self._thrshd, self._step)
         if self._downsample > 1:
             return tuple([v[:, ::self._downsample,...] if i%2 ==0 else v for i, v in enumerate(numpy_tuple)])
         return numpy_tuple
     
     def load_csi_data_from_files(self, np_files):
-        """
-        Returns the Numpy Array for training within the format of (X_lable1, y_label1, ...., X_label10, y_label10)
-        Args:
-            np_files: ('x_waving.npz', 'x_twist.npz', 'x_standing.npz', 'x_squatting.npz', 'x_rubhand.npz', 'x_pushpull.npz', 'x_punching.npz', 'x_nopeople.npz', 'x_jump.npz', 'x_clap.npz')
-        """
-        if len(np_files) != 10:
-            raise ValueError('There should be 10 numpy files for waving, twist, standing, squatting, rubhand, pushpull, punching, nopeople, jump, clap.')
+        if len(np_files) != len(self._labels):
+            raise ValueError(f'There should be {len(self._labels)} numpy files for the specified labels.')
         x = [np.load(f)['arr_0'] for f in np_files]
         if self._downsample > 1:
             x = [arr[:,::self._downsample, :] for arr in x]
@@ -236,12 +163,7 @@ class CSIModelConfig:
             numpy_list.append(y[i])
         return tuple(numpy_list)
 
-
-    
     def build_model(self, n_unit_lstm=200, n_unit_atten=400):
-        """
-        Returns the Tensorflow Model which uses AttenLayer
-        """
         if self._downsample > 1:
             length = len(np.ones((self._win_len,))[::self._downsample])
             x_in = tf.keras.Input(shape=(length, 166))
@@ -255,14 +177,57 @@ class CSIModelConfig:
 
     @staticmethod
     def load_model(hdf5path):
-        """
-        Returns the Tensorflow Model for AttenLayer
-        Args:
-            hdf5path: str, the model file path
-        """
         model = tf.keras.models.load_model(hdf5path, custom_objects={'AttenLayer':AttenLayer})
         return model
-    
+
+def plot_training_history(history_path, plot_path):
+    with open(history_path, "r") as f:
+        history = json.load(f)
+
+    epochs = history["epoch"]
+    train_loss = history["train_loss"]
+    train_accuracy = history["train_accuracy"]
+    test_loss = history["test_loss"]
+    test_accuracy = history["test_accuracy"]
+
+    plt.figure(figsize=(12, 12))
+
+    plt.subplot(2, 1, 1)
+    plt.plot(epochs, train_loss, label="Training Loss", color="blue", marker=",")
+    plt.plot(epochs, test_loss, label="Testing Loss", color="orange", marker=",")
+    plt.title("Loss Over Epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.legend()
+
+    plt.subplot(2, 1, 2)
+    plt.plot(epochs, train_accuracy, label="Training Accuracy", color="green", marker=",")
+    plt.plot(epochs, test_accuracy, label="Testing Accuracy", color="red", marker=",")
+    plt.title("Accuracy Over Epochs")
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy")
+    plt.grid(True)
+    plt.legend()
+
+    plt.tight_layout()
+    plt.savefig(plot_path, bbox_inches="tight")
+    plt.show()
+    print(f"Curve Plot saved at {plot_path}")
+
+def plot_confusion_matrix(model, x_valid, y_valid, labels, save_path):
+    y_true = np.argmax(y_valid, axis=1)
+    y_pred = np.argmax(model.predict(x_valid), axis=1)
+
+    cm = confusion_matrix(y_true, y_pred, labels=range(len(labels)))
+
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    disp.plot(cmap='Blues', xticks_rotation=45)
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight")
+    plt.show()
+    print(f"Confusion matrix saved at {save_path}")
 
 if __name__ == "__main__":
     import sys
@@ -270,47 +235,57 @@ if __name__ == "__main__":
         print("Error! Correct Command: python3 csimodel.py Dataset_folder_path")
     raw_data_folder = sys.argv[1]
 
-    # preprocessing
-    cfg = CSIModelConfig(win_len=1000, step=200, thrshd=0.6, downsample=2)
-    numpy_tuple = cfg.preprocessing(raw_data_folder, save=True)
-    # load previous saved numpy files, ignore this if you haven't saved numpy array to files before
-    # numpy_tuple = cfg.load_csi_data_from_files(('x_waving.npz', 'x_twist.npz', 'x_standing.npz', 'x_squatting.npz', 'x_rubhand.npz', 'x_pushpull.npz', 'x_punching.npz', 'x_nopeople.npz', 'x_jump.npz', 'x_clap.npz'))
-    x_waving, y_waving, x_twist, y_twist, x_standing, y_standing, x_squatting, y_squatting, x_rubhand, y_rubhand, x_pushpull, y_pushpull, x_punching, y_punching, x_nopeople, y_nopeople, x_jump, y_jump, x_clap, y_clap = numpy_tuple
-    x_train, y_train, x_valid, y_valid = train_valid_split(
-        (x_waving, x_twist, x_standing, x_squatting, x_rubhand, x_pushpull, x_punching, x_nopeople, x_jump, x_clap),
-        train_portion=0.9, seed=379)
-    # parameters for Deep Learning Model
-    model = cfg.build_model(n_unit_lstm=200, n_unit_atten=400)
-    # train
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-        loss='categorical_crossentropy', 
-        metrics=['accuracy'])
-    model.summary()
-    model.fit(
-        x_train,
-        y_train,
-        batch_size=128, epochs=60,
-        validation_data=(x_valid, y_valid),
-        callbacks=[
-            tf.keras.callbacks.ModelCheckpoint('best_atten.hdf5',
-                                                monitor='val_accuracy',
-                                                save_best_only=True,
-                                                save_weights_only=False)
-            ])
-    # load the best model
-    model = cfg.load_model('best_atten.hdf5')
-    y_pred = model.predict(x_valid)
+    # Define the three configurations
+    configs = [
+        # ("all", ["waving", "twist", "standing", "squatting", "rubhand", "pushpull", "punching", "nopeople", "jump", "clap"]),
+        ("macro", ["standing", "squatting", "jump", "nopeople"]),
+        ("micro", ["waving", "twist", "rubhand", "pushpull", "punching", "clap"])
+    ]
 
-    from sklearn.metrics import confusion_matrix
-    print(confusion_matrix(np.argmax(y_valid, axis=1), np.argmax(y_pred, axis=1)))
+    for config_name, labels in configs:
+        print(f"Running configuration: {config_name}")
+        cfg = CSIModelConfig(labels=labels, win_len=1000, step=200, thrshd=0.6, downsample=2)
+        numpy_tuple = cfg.preprocessing(raw_data_folder, save=True)
+        if numpy_tuple is None:
+            print("No valid data found. Exiting.")
+            continue
+        
+        x_train, y_train, x_valid, y_valid = train_valid_split(numpy_tuple, train_portion=0.9, seed=379)
+        
+        model = cfg.build_model(n_unit_lstm=200, n_unit_atten=400)
+        
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+            loss='categorical_crossentropy', 
+            metrics=['accuracy'])
+        model.summary()
+        history = model.fit(
+            x_train,
+            y_train,
+            batch_size=128, epochs=60,
+            validation_data=(x_valid, y_valid),
+            callbacks=[
+                tf.keras.callbacks.ModelCheckpoint(f'best_atten_{config_name}.hdf5',
+                                                    monitor='val_accuracy',
+                                                    save_best_only=True,
+                                                    save_weights_only=False)
+                ])
+        
+        history_dict = {
+            "epoch": list(range(1, 61)),
+            "train_loss": history.history['loss'],
+            "train_accuracy": history.history['accuracy'],
+            "test_loss": history.history['val_loss'],
+            "test_accuracy": history.history['val_accuracy']
+        }
+        with open(f"training_history_{config_name}.json", "w") as f:
+            json.dump(history_dict, f)
 
+        plot_training_history(f"training_history_{config_name}.json", f"training_plot_{config_name}.png")
 
+        model = cfg.load_model(f'best_atten_{config_name}.hdf5')
+        y_pred = model.predict(x_valid)
 
+        plot_confusion_matrix(model, x_valid, y_valid, labels, f"confusion_matrix_{config_name}.png")
 
-
-
-
-
-
-    
+        print(confusion_matrix(np.argmax(y_valid, axis=1), np.argmax(y_pred, axis=1)))
