@@ -10,6 +10,23 @@ import glob
 import os
 import csv
 
+from tensorflow.python.client import device_lib
+
+print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
+print(device_lib.list_local_devices())
+
+# Set TensorFlow to use the GPU
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        # Currently, memory growth needs to be the same across GPUs
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        logical_gpus = tf.config.experimental.list_logical_devices('GPU')
+        print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
+    except RuntimeError as e:
+        # Memory growth must be set before GPUs have been initialized
+        print(e)
 
 def merge_csi_label(csifile, win_len=100, thrshd=0.6, step=20):
     """
@@ -198,11 +215,12 @@ class CSIModelConfig:
         thrshd    :  float   (0.6  default) used to check if the activity is intensive inside a window
         downsample:  integer >=1 (2 default) downsample along the time axis
     """
-    def __init__(self, win_len=100, step=20, thrshd=0.6, downsample=2):
+    def __init__(self, dataset_path, win_len=100, step=20, thrshd=0.6, downsample=2):
         self._win_len = win_len
         self._step = step
         self._thrshd = thrshd
-        self._labels = ("waving", "twist", "standing", "squatting", "rubhand", "pushpull", "punching", "nopeople", "jump", "clap")
+        # self._labels = tuple(sorted(os.listdir(dataset_path)))
+        self._labels = ('clap', 'jump', 'nopeople', 'punching', 'pushpull', 'rubhand', 'squatting', 'standing', 'twist', 'waving')
         self._downsample = downsample
 
     def preprocessing(self, raw_folder, save=False):
@@ -265,20 +283,70 @@ class CSIModelConfig:
     
 
 if __name__ == "__main__":
-    import sys
-    if len(sys.argv) != 2:
-        print("Error! Correct Command: python3 csimodel.py Dataset_folder_path")
-    raw_data_folder = sys.argv[1]
+    import timeit
+    start_time = timeit.default_timer()
+
+    # import sys
+    # if len(sys.argv) != 2:
+    #     print("Error! Correct Command: python3 csimodel.py Dataset_folder_path")
+    # raw_data_folder = sys.argv[1]
+
+    raw_data_folder = "FYP_Data\\front"
 
     # preprocessing
-    cfg = CSIModelConfig(win_len=1000, step=200, thrshd=0.6, downsample=2)
+    cfg = CSIModelConfig(dataset_path=raw_data_folder, win_len=1000, step=200, thrshd=0.6, downsample=2)
+    activities = list(cfg._labels)
+    print(activities)
+    
     numpy_tuple = cfg.preprocessing(raw_data_folder, save=True)
+    '''
+    
     # load previous saved numpy files, ignore this if you haven't saved numpy array to files before
     # numpy_tuple = cfg.load_csi_data_from_files(('x_waving.npz', 'x_twist.npz', 'x_standing.npz', 'x_squatting.npz', 'x_rubhand.npz', 'x_pushpull.npz', 'x_punching.npz', 'x_nopeople.npz', 'x_jump.npz', 'x_clap.npz'))
     x_waving, y_waving, x_twist, y_twist, x_standing, y_standing, x_squatting, y_squatting, x_rubhand, y_rubhand, x_pushpull, y_pushpull, x_punching, y_punching, x_nopeople, y_nopeople, x_jump, y_jump, x_clap, y_clap = numpy_tuple
     x_train, y_train, x_valid, y_valid = train_valid_split(
         (x_waving, x_twist, x_standing, x_squatting, x_rubhand, x_pushpull, x_punching, x_nopeople, x_jump, x_clap),
-        train_portion=0.9, seed=379)
+        train_portion=0.75, seed=379)
+
+    ''' 
+        # Assign the numpy_tuple to variables in the specified order
+    x_clap, y_clap, x_jump, y_jump, x_nopeople, y_nopeople, x_punching, y_punching, x_pushpull, y_pushpull, x_rubhand, y_rubhand, x_squatting, y_squatting, x_standing, y_standing, x_twist, y_twist, x_waving, y_waving = numpy_tuple
+    
+    x_train, y_train, x_valid, y_valid = train_valid_split(
+        (x_clap, x_jump, x_nopeople, x_punching, x_pushpull, x_rubhand, x_squatting, x_standing, x_twist, x_waving),
+        train_portion=0.8, seed=379)   
+    '''
+    # Create dictionaries to store the data
+    x_data = {}
+    y_data = {}
+    
+    # Populate the dictionaries with the data
+    for i, activity in enumerate(activities):
+        x_data[activity] = numpy_tuple[2 * i]
+        y_data[activity] = numpy_tuple[2 * i + 1]
+   
+    # Combine the data for training and validation
+    x_train_list = []
+    y_train_list = []
+    x_valid_list = []
+    y_valid_list = []
+    
+    for activity in activities:
+        x_train, y_train, x_valid, y_valid = train_valid_split(
+            (x_data[activity],), train_portion=0.75, seed=379)
+        x_train_list.append(x_train)
+        y_train_list.append(y_train)
+        x_valid_list.append(x_valid)
+        y_valid_list.append(y_valid)
+    
+    x_train = np.concatenate(x_train_list, axis=0)
+    y_train = np.concatenate(y_train_list, axis=0)
+    x_valid = np.concatenate(x_valid_list, axis=0)
+    y_valid = np.concatenate(y_valid_list, axis=0)
+
+    '''
+
+    print('👍', x_train.shape, y_train.shape, x_valid.shape, y_valid.shape)
     # parameters for Deep Learning Model
     model = cfg.build_model(n_unit_lstm=200, n_unit_atten=400)
     # train
@@ -290,7 +358,7 @@ if __name__ == "__main__":
     model.fit(
         x_train,
         y_train,
-        batch_size=128, epochs=60,
+        batch_size=128, epochs=30,
         validation_data=(x_valid, y_valid),
         callbacks=[
             tf.keras.callbacks.ModelCheckpoint('best_atten.hdf5',
@@ -302,15 +370,24 @@ if __name__ == "__main__":
     model = cfg.load_model('best_atten.hdf5')
     y_pred = model.predict(x_valid)
 
-    from sklearn.metrics import confusion_matrix
-    print(confusion_matrix(np.argmax(y_valid, axis=1), np.argmax(y_pred, axis=1)))
-
-
-
-
-
-
-
-
+    from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+    import matplotlib.pyplot as plt
 
     
+    activities = list(cfg._labels)
+    print(activities)
+    print(y_pred.shape, np.argmax(y_pred, axis=1))
+    print(y_valid.shape, np.argmax(y_valid, axis=1))
+
+    cm = confusion_matrix(np.argmax(y_valid, axis=1), np.argmax(y_pred, axis=1))
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=activities)
+    disp.plot(cmap='Blues', xticks_rotation=45)
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    plt.savefig("./confusion_matrix_test.png", bbox_inches="tight")
+    plt.show()
+
+# =======================================================================
+
+end_time = timeit.default_timer()
+print(f"time taken to run: {end_time - start_time} seconds")
